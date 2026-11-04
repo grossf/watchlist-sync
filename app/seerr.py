@@ -13,6 +13,26 @@ SKIPPED = {
     7: "Deleted in Seerr",
 }
 REQUEST_DECLINED = 3
+REQUEST_PENDING = 1
+
+ADMIN, MANAGE_REQUESTS, REQUEST, AUTO_APPROVE, AUTO_APPROVE_MOVIE = 2, 16, 32, 128, 256
+REQUEST_4K, REQUEST_4K_MOVIE, AUTO_APPROVE_4K, AUTO_APPROVE_4K_MOVIE, REQUEST_MOVIE = 1024, 2048, 32768, 65536, 262144
+
+
+class QuotaReached(Exception):
+    pass
+
+
+def approval(permissions: int | None, is4k: bool) -> str | None:
+    if permissions is None:
+        return None
+    if permissions & ADMIN:
+        return "auto"
+    can_request = (REQUEST_4K | REQUEST_4K_MOVIE) if is4k else (REQUEST | REQUEST_MOVIE)
+    auto = (AUTO_APPROVE_4K | AUTO_APPROVE_4K_MOVIE) if is4k else (AUTO_APPROVE | AUTO_APPROVE_MOVIE)
+    if not permissions & can_request:
+        return "none"
+    return "auto" if permissions & (auto | MANAGE_REQUESTS) else "manual"
 
 
 class Seerr:
@@ -38,7 +58,8 @@ class Seerr:
         resp = self.client.get("/user?take=500&skip=0&sort=displayname")
         resp.raise_for_status()
         return [
-            {"id": u["id"], "name": u.get("displayName") or u.get("username") or u.get("email") or f"User {u['id']}"}
+            {"id": u["id"], "name": u.get("displayName") or u.get("username") or u.get("email") or f"User {u['id']}",
+             "permissions": u.get("permissions")}
             for u in resp.json().get("results", [])
         ]
 
@@ -59,15 +80,16 @@ class Seerr:
         return (exact or movies or [None])[0]
 
     def request_movie(self, tmdb_id: int, is4k: bool, user_id: int | None) -> dict:
-        body: dict = {"mediaType": "movie", "mediaId": tmdb_id, "is4k": is4k}
-        if user_id:
-            body["userId"] = user_id
-        resp = self.client.post("/request", json=body)
+        headers = {"X-API-User": str(user_id)} if user_id else {}
+        body = {"mediaType": "movie", "mediaId": tmdb_id, "is4k": is4k}
+        resp = self.client.post("/request", json=body, headers=headers)
         if resp.status_code >= 400:
             try:
                 msg = resp.json().get("message") or resp.text
             except ValueError:
                 msg = resp.text
+            if resp.status_code == 403 and "quota" in msg.lower():
+                raise QuotaReached(msg)
             raise RuntimeError(f"Seerr refused the request (HTTP {resp.status_code}): {msg}")
         return resp.json()
 

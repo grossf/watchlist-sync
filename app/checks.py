@@ -10,7 +10,9 @@ from .seerr import Seerr
 log = logging.getLogger("checks")
 
 seerr_state: dict | None = None
+seerr_users: list[dict] | None = None
 watchlist_state: dict[str, dict] = {}
+API_KEY_USER = 1
 
 
 def describe_seerr_error(exc: Exception, url: str) -> str:
@@ -56,10 +58,34 @@ def test_watchlist(username: str, delay: float = 0) -> dict:
     return {"ok": False, "detail": detail, "checked_at": db.now()}
 
 
-def refresh() -> None:
-    global seerr_state, watchlist_state
+def load_users(s: settings.Settings) -> list[dict]:
+    global seerr_users
+    seerr_users = Seerr(s.seerr_url, s.seerr_api_key).users()
+    return seerr_users
+
+
+def find_user(user_id: int | None) -> dict | None:
+    user_id = user_id or API_KEY_USER
+    return next((u for u in seerr_users or [] if u["id"] == user_id), None)
+
+
+def refresh_seerr() -> None:
+    global seerr_state, seerr_users
     s = settings.load()
     seerr_state = test_seerr(s.seerr_url, s.seerr_api_key) if s.seerr_url and s.seerr_api_key else None
+    if not (seerr_state or {}).get("ok"):
+        seerr_users = None
+        return
+    try:
+        load_users(s)
+    except Exception:
+        log.exception("Could not load Seerr users")
+
+
+def refresh() -> None:
+    global watchlist_state
+    refresh_seerr()
+    s = settings.load()
     watchlist_state = {u: test_watchlist(u, s.letterboxd_delay) for u in s.letterboxd_usernames}
 
 
@@ -68,8 +94,4 @@ def refresh_in_background() -> None:
 
 
 def refresh_seerr_in_background() -> None:
-    def work() -> None:
-        global seerr_state
-        s = settings.load()
-        seerr_state = test_seerr(s.seerr_url, s.seerr_api_key) if s.seerr_url and s.seerr_api_key else None
-    threading.Thread(target=work, daemon=True, name="seerr-check").start()
+    threading.Thread(target=refresh_seerr, daemon=True, name="seerr-check").start()

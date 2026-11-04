@@ -14,9 +14,9 @@ SECRET_KEYS = ("password_hash", "session_secret")
 class Settings:
     seerr_url: str = ""
     seerr_api_key: str = ""
-    seerr_user_id: int | None = None
     request_4k: bool = False
     letterboxd_usernames: list[str] = field(default_factory=list)
+    watchlist_users: dict[str, int] = field(default_factory=dict)
     schedule_enabled: bool = True
     schedule_time: str = "04:00"
     dry_run: bool = True
@@ -31,7 +31,8 @@ class Settings:
     @property
     def sources(self) -> list[Source]:
         return [
-            Source(key=f"watchlist:{u}", username=u, label=u, path=f"/{u}/watchlist/")
+            Source(key=f"watchlist:{u}", username=u, label=u, path=f"/{u}/watchlist/",
+                   seerr_user_id=self.watchlist_users.get(u))
             for u in self.letterboxd_usernames
         ]
 
@@ -93,8 +94,8 @@ def validate(changes: dict) -> dict:
             value = str(value).strip()
             if not value:
                 continue
-        elif key == "seerr_user_id":
-            value = _int(value, "Seerr user", 1, 10**9) if value not in (None, "", 0) else None
+        elif key == "watchlist_users":
+            value = {normalize_username(u): _int(i, "Seerr user", 1, 10**9) for u, i in dict(value).items() if i}
         elif key in ("request_4k", "schedule_enabled", "dry_run"):
             value = bool(value)
         elif key == "letterboxd_usernames":

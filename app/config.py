@@ -12,6 +12,7 @@ class Source:
     username: str
     label: str
     path: str
+    seerr_user_id: int | None = None
 
 
 VERSION = "1.0.0"

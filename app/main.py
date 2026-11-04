@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from . import auth, checks, db, runner, scheduler, settings
 from .config import GITHUB_URL, TZ, VERSION
-from .seerr import Seerr
+from .seerr import approval
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 STATIC = Path(__file__).parent / "static"
@@ -64,6 +64,11 @@ class SeerrTestBody(BaseModel):
 
 class WatchlistBody(BaseModel):
     username: str
+    seerr_user_id: int | None = None
+
+
+class WatchlistUserBody(BaseModel):
+    seerr_user_id: int | None = None
 
 
 class OrderBody(BaseModel):
@@ -106,6 +111,25 @@ def _watchlist_key(username: str) -> str:
     return f"watchlist:{username}"
 
 
+def _public_user(user: dict | None, is4k: bool) -> dict | None:
+    if not user:
+        return None
+    return {"id": user["id"], "name": user["name"], "approval": approval(user.get("permissions"), is4k)}
+
+
+def _watchlist_user(s: settings.Settings, username: str) -> dict:
+    user_id = s.watchlist_users.get(username) or checks.API_KEY_USER
+    return _public_user(checks.find_user(user_id), s.request_4k) or {"id": user_id, "name": f"User #{user_id}", "approval": None}
+
+
+def _check_user_id(user_id: int | None) -> int | None:
+    if user_id is None or user_id == checks.API_KEY_USER:
+        return None
+    if checks.seerr_users is not None and not checks.find_user(user_id):
+        raise HTTPException(400, f"Seerr has no user #{user_id}")
+    return user_id
+
+
 @app.get("/api/status")
 def status():
     s = settings.load()
@@ -129,7 +153,8 @@ def status():
         },
         "watchlists": [
             {"username": u, "key": _watchlist_key(u), "url": f"https://letterboxd.com/{u}/watchlist/",
-             "check": checks.watchlist_state.get(u), "last_run": last.get(_watchlist_key(u))}
+             "check": checks.watchlist_state.get(u), "last_run": last.get(_watchlist_key(u)),
+             "seerr_user": _watchlist_user(s, u)}
             for u in s.letterboxd_usernames
         ],
     }
@@ -184,7 +209,9 @@ def add_watchlist(body: WatchlistBody):
         raise HTTPException(409, f"{username} is already in your list")
     if not result["ok"]:
         raise HTTPException(400, result["detail"])
-    settings.save({"letterboxd_usernames": s.letterboxd_usernames + [username]})
+    user_id = _check_user_id(body.seerr_user_id)
+    users = {**s.watchlist_users, username: user_id} if user_id else s.watchlist_users
+    settings.save({"letterboxd_usernames": s.letterboxd_usernames + [username], "watchlist_users": users})
     checks.watchlist_state = {**checks.watchlist_state, username: result}
     return {"username": username, **result}
 
@@ -194,7 +221,8 @@ def remove_watchlist(username: str):
     s = settings.load()
     if username not in s.letterboxd_usernames:
         raise HTTPException(404, "Unknown watchlist")
-    settings.save({"letterboxd_usernames": [u for u in s.letterboxd_usernames if u != username]})
+    settings.save({"letterboxd_usernames": [u for u in s.letterboxd_usernames if u != username],
+                   "watchlist_users": {u: i for u, i in s.watchlist_users.items() if u != username}})
     checks.watchlist_state = {u: c for u, c in checks.watchlist_state.items() if u != username}
     return {"ok": True}
 
@@ -208,6 +236,19 @@ def reorder_watchlists(body: OrderBody):
     return {"ok": True}
 
 
+@app.put("/api/watchlists/{username}")
+def update_watchlist(username: str, body: WatchlistUserBody):
+    s = settings.load()
+    if username not in s.letterboxd_usernames:
+        raise HTTPException(404, "Unknown watchlist")
+    user_id = _check_user_id(body.seerr_user_id)
+    users = {u: i for u, i in s.watchlist_users.items() if u != username}
+    if user_id:
+        users[username] = user_id
+    s = settings.save({"watchlist_users": users})
+    return {"username": username, "seerr_user": _watchlist_user(s, username)}
+
+
 @app.get("/api/settings")
 def get_settings():
     return settings.public(settings.load())
@@ -219,6 +260,7 @@ async def put_settings(request: Request):
     password = body.pop("password", None)
     clear_password = body.pop("clear_password", False)
     body.pop("letterboxd_usernames", None)
+    body.pop("watchlist_users", None)
     if password and len(password) < 8:
         raise HTTPException(400, "Password must be at least 8 characters")
     try:
@@ -258,16 +300,16 @@ def test_seerr(body: SeerrTestBody):
     return checks.test_seerr(url, key)
 
 
-@app.post("/api/seerr/users")
-def seerr_users(body: SeerrTestBody):
+@app.get("/api/seerr/users")
+def seerr_users():
+    s = settings.load()
+    if not (s.seerr_url and s.seerr_api_key):
+        raise HTTPException(400, "Connect Seerr first")
     try:
-        url, key = _seerr_credentials(body)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    try:
-        return Seerr(url, key).users()
+        users = checks.load_users(s)
     except Exception as exc:
-        raise HTTPException(502, f"Could not load Seerr users: {checks.describe_seerr_error(exc, url)}")
+        raise HTTPException(502, f"Could not load Seerr users: {checks.describe_seerr_error(exc, s.seerr_url)}")
+    return [_public_user(u, s.request_4k) for u in users]
 
 
 @app.post("/api/checks/refresh")

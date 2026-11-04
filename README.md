@@ -12,8 +12,8 @@ docker compose up -d --build
 
 Open `http://<server>:8080`. On first launch the Watchlists page walks you through two steps:
 
-1. **Connect Seerr** (Connections page): enter the URL and API key (Seerr → Settings → General → API Key), then click **Test connection**. Use an address the container can reach, such as `http://192.168.1.10:5055`, or `http://seerr:5055` if both containers share a Docker network. `localhost` means the container itself. Optionally pick the Seerr user the requests should show up under.
-2. **Add your first watchlist** with the **+** button. The username is checked on Letterboxd before it's added, and the watchlist must be public.
+1. **Connect Seerr** (Connections page): enter the URL and API key (Seerr → Settings → General → API Key), then click **Test connection**. Use an address the container can reach, such as `http://192.168.1.10:5055`, or `http://seerr:5055` if both containers share a Docker network. `localhost` means the container itself.
+2. **Add your first watchlist** with the **+** button. The username is checked on Letterboxd before it's added, and the watchlist must be public. Pick the Seerr user it requests as: requests follow that user's Seerr permissions, so an admin's are auto-approved while a regular user's wait for your approval. You can change it later in edit mode.
 
 Dry run is on for a fresh install: do a first sync, check the Logs page, then turn dry run off in **Settings**. Settings also holds the daily sync time and an optional password. Set one if the app is reachable from outside your home network, because the page can use your Seerr API key.
 

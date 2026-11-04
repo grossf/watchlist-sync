@@ -4,7 +4,7 @@ import threading
 from . import checks, db
 from .config import Source
 from .letterboxd import Film, Letterboxd, LetterboxdBlocked
-from .seerr import Seerr, existing_state
+from .seerr import REQUEST_PENDING, QuotaReached, Seerr, approval, existing_state
 from .settings import Settings, load as load_settings
 
 log = logging.getLogger("runner")
@@ -49,6 +49,7 @@ def _run_source(s: Settings, source: Source, trigger: str, dry_run: bool, lb: Le
     status, message = "ok", None
     consecutive_errors = 0
     last_error = None
+    quota_hit = False
 
     def bump(key: str) -> None:
         counts[key] += 1
@@ -58,6 +59,14 @@ def _run_source(s: Settings, source: Source, trigger: str, dry_run: bool, lb: Le
         seerr_check = checks.seerr_state or {}
         if not seerr_check.get("ok"):
             raise StopSync(f"Seerr isn't reachable: {seerr_check.get('detail', 'not set up')}")
+        user = checks.find_user(source.seerr_user_id)
+        if checks.seerr_users is not None and user is None:
+            raise StopSync(f"Seerr user #{source.seerr_user_id} doesn't exist anymore. "
+                           "Pick another user for this watchlist in edit mode.")
+        user_name = user["name"] if user else f"user #{source.seerr_user_id or checks.API_KEY_USER}"
+        if user and approval(user.get("permissions"), s.request_4k) == "none":
+            raise StopSync(f"{user_name} isn't allowed to request {'4K ' if s.request_4k else ''}movies in Seerr. "
+                           "Change their permissions in Seerr, or pick another user in edit mode.")
         try:
             for film in lb.iter_films(source.path, MAX_PAGES):
                 bump("scanned")
@@ -95,11 +104,13 @@ def _run_source(s: Settings, source: Source, trigger: str, dry_run: bool, lb: Le
                         db.add_event(run_id, "would_request", film.name, film.slug, tmdb_id,
                                      "Dry run, nothing was sent")
                     else:
-                        seerr.request_movie(tmdb_id, s.request_4k, s.seerr_user_id)
-                        db.add_event(run_id, "requested", film.name, film.slug, tmdb_id)
+                        created = seerr.request_movie(tmdb_id, s.request_4k, source.seerr_user_id)
+                        pending = created.get("status") == REQUEST_PENDING
+                        db.add_event(run_id, "requested", film.name, film.slug, tmdb_id,
+                                     f"Requested as {user_name}" + (", waiting for approval" if pending else ""))
                     bump("requested")
                     consecutive_errors = 0
-                except LetterboxdBlocked:
+                except (LetterboxdBlocked, QuotaReached):
                     raise
                 except Exception as exc:
                     log.exception("Failed on %s", film.slug)
@@ -115,12 +126,18 @@ def _run_source(s: Settings, source: Source, trigger: str, dry_run: bool, lb: Le
         except LookupError:
             checks.watchlist_state[source.username] = checks.test_watchlist(source.username)
             raise StopSync(f"Letterboxd has no public watchlist for {source.username}.")
-        if lb.truncated:
+        except QuotaReached:
+            quota_hit = True
+            counts["scanned"] -= 1
+            current["scanned"] = counts["scanned"]
+        if quota_hit:
+            message = f"{user_name} reached their Seerr request limit. The remaining films are tried at the next sync."
+        elif lb.truncated:
             message = f"Only the first {MAX_PAGES * 28} films were checked"
         elif counts["errors"]:
             failed = counts["errors"]
             message = f"{failed} film{'' if failed == 1 else 's'} failed: {last_error}"
-        if not lb.truncated:
+        if not (lb.truncated or quota_hit):
             total = counts["scanned"]
     except StopSync as exc:
         status, message = "failed", str(exc)

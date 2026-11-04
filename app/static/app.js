@@ -1,6 +1,7 @@
 const $ = (sel, el = document) => el.querySelector(sel);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ic = (name, cls = "") => `<svg class="i ${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+const APPROVAL = { auto: "auto-approved", manual: "needs your approval", none: "can't request movies" };
 const COLORS = { in_seerr: "var(--green)", requested: "var(--blue)", would_request: "var(--purple)", skipped: "var(--grey)", not_found: "var(--amber)", errors: "var(--red)" };
 
 let status = null;
@@ -63,6 +64,17 @@ function ago(iso) {
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const seerrOk = () => !!status?.seerr.check?.ok;
 const isLive = (w) => status?.running && status.current?.username === w.username;
+
+function userOptions(selected) {
+  const users = seerrUsers || [];
+  const list = users.some((u) => u.id === selected.id) ? users : [selected, ...users];
+  return list.map((u) => `<option value="${u.id}" ${u.id === selected.id ? "selected" : ""}>${esc(u.name)}${APPROVAL[u.approval] ? ` · ${APPROVAL[u.approval]}` : ""}</option>`).join("");
+}
+
+async function loadSeerrUsers() {
+  if (!seerrOk()) return;
+  try { seerrUsers = await api("/api/seerr/users"); } catch (e) { toast(e.message); }
+}
 
 function logsLink(params) {
   return "#/logs?" + new URLSearchParams(params).toString();
@@ -146,7 +158,7 @@ function legendHtml(w, seg, run) {
     const inner = `<span class="sw" style="background:${COLORS[k]}"></span>${n} ${label[k]}`;
     return kindFor[k] ? `<a class="lg" href="${logsLink({ watchlist: w.username, kind: kindFor[k] })}">${inner}</a>` : `<span class="lg">${inner}</span>`;
   });
-  if (run?.status === "failed" && seg.notChecked) {
+  if (seg.notChecked) {
     items.push(`<span class="lg"><span class="sw" style="background:var(--line);box-shadow:inset 0 0 0 1px var(--line-strong)"></span>${seg.notChecked} not checked</span>`);
   }
   if (!items.length) items.push(`<span class="lg">Nothing to check</span>`);
@@ -166,7 +178,7 @@ function cardHtml(w) {
   const name = editing
     ? `<span class="name">${esc(w.username)}</span>`
     : `<a class="name" href="${esc(w.url)}" target="_blank" rel="noopener" title="Open on Letterboxd">${esc(w.username)}${ic("ext", "sm ext")}</a>`;
-  const sub = missing ? "watchlist not found" : count != null ? plural(count, "film") : "";
+  const sub = [missing ? "watchlist not found" : count != null ? plural(count, "film") : "", !editing && w.seerr_user ? `as ${w.seerr_user.name}` : ""].filter(Boolean).join(" · ");
 
   let actions;
   if (editing) {
@@ -181,7 +193,8 @@ function cardHtml(w) {
     actions = `<button class="ghost" data-act="sync" data-key="${esc(w.key)}" title="${title}" aria-label="${title}" ${canSync ? "" : "disabled"}>${ic("rotate", live ? "spin" : "")}</button>`;
   }
 
-  let body = "";
+  let body = editing ? `<div class="row user-row"><label class="small muted" for="user-${esc(w.username)}">Request as</label>
+    <select id="user-${esc(w.username)}" data-act="user" data-u="${esc(w.username)}">${userOptions(w.seerr_user)}</select></div>` : "";
   if (missing) {
     body = `<div class="err">${ic("alert", "sm")}<span>${esc(check.detail)}</span></div>`;
   } else {
@@ -201,7 +214,7 @@ function cardHtml(w) {
     }
     body += `<div class="row spread" style="align-items:flex-start;flex-wrap:nowrap"><div class="legend">${left}</div><span class="small dim" style="flex:none">${right}</span></div>`;
     if (!live && run?.message) {
-      body += `<div class="err">${ic("alert", "sm")}<span>${esc(run.message)}${run.errors ? ` <a href="${logsLink({ watchlist: w.username, kind: "error" })}" style="text-decoration:underline;text-underline-offset:3px">Show in log</a>` : ""}</span></div>`;
+      body += `<div class="err ${run.status === "failed" || run.errors ? "" : "warn"}">${ic("alert", "sm")}<span>${esc(run.message)}${run.errors ? ` <a href="${logsLink({ watchlist: w.username, kind: "error" })}" style="text-decoration:underline;text-underline-offset:3px">Show in log</a>` : ""}</span></div>`;
     } else if (check && !check.ok) {
       body += `<div class="err warn">${ic("alert", "sm")}<span>${esc(check.detail)}</span></div>`;
     }
@@ -294,7 +307,13 @@ $("#page").addEventListener("click", async (e) => {
   if (!el || route.page !== "watchlists") return;
   const act = el.dataset.act;
   if (act === "add") openAddDialog();
-  else if (act === "edit") { editing = true; editOrder = status.watchlists.map((w) => w.username); renderWatchlists(); }
+  else if (act === "edit") {
+    editing = true;
+    editOrder = status.watchlists.map((w) => w.username);
+    renderWatchlists();
+    await loadSeerrUsers();
+    if (editing) renderWatchlists();
+  }
   else if (act === "done") saveOrder();
   else if (act === "sync-all") startSync("all");
   else if (act === "sync") startSync(el.dataset.key);
@@ -316,6 +335,16 @@ $("#page").addEventListener("click", async (e) => {
     el.disabled = true;
     try { status = await api("/api/checks/refresh", { method: "POST" }); render(); } catch (err) { toast(err.message); }
   }
+});
+
+$("#page").addEventListener("change", async (e) => {
+  const el = e.target;
+  if (el.dataset.act !== "user" || route.page !== "watchlists") return;
+  try {
+    const r = await api(`/api/watchlists/${encodeURIComponent(el.dataset.u)}`, { method: "PUT", json: { seerr_user_id: Number(el.value) } });
+    toast(`${r.username} now requests as ${r.seerr_user.name}`);
+  } catch (err) { toast(err.message); }
+  await refresh();
 });
 
 let dragged = null;
@@ -355,13 +384,26 @@ function openAddDialog() {
     <div class="row" style="flex-wrap:nowrap"><input id="dlg-u" placeholder="letterboxd.com/yourname" autocomplete="off"><button id="dlg-check">Check</button></div>
     <div id="dlg-res"></div>
     <p class="hint">The watchlist has to be public.</p>
+    <div id="dlg-user" class="hidden"><label class="field" for="dlg-user-id">Request as</label>
+      <select id="dlg-user-id"></select>
+      <p class="hint">Requests follow this user's Seerr permissions, so they're either auto-approved or wait for your approval.</p></div>
     <div class="card-actions"><button id="dlg-cancel">Cancel</button><button class="primary" id="dlg-add" disabled>Add watchlist</button></div>
   </div></div>`;
   const input = $("#dlg-u"), res = $("#dlg-res"), add = $("#dlg-add");
   const close = () => { root.innerHTML = ""; document.removeEventListener("keydown", onKey); };
   const onKey = (e) => { if (e.key === "Escape") close(); };
   document.addEventListener("keydown", onKey);
-  const reset = () => { checked = null; res.innerHTML = ""; add.disabled = true; };
+  const userBox = $("#dlg-user"), userSel = $("#dlg-user-id");
+  const reset = () => { checked = null; res.innerHTML = ""; add.disabled = true; userBox.classList.add("hidden"); };
+  const usersReady = seerrUsers ? Promise.resolve() : loadSeerrUsers();
+  async function showUsers(r) {
+    await usersReady;
+    if (!seerrUsers?.length || checked !== r.username) return;
+    const names = [r.username, r.display_name].map((n) => String(n || "").toLowerCase());
+    const match = seerrUsers.find((u) => names.includes(u.name.toLowerCase()));
+    userSel.innerHTML = userOptions(match || seerrUsers.find((u) => u.id === 1) || seerrUsers[0]);
+    userBox.classList.remove("hidden");
+  }
 
   async function check() {
     const value = input.value.trim();
@@ -377,6 +419,7 @@ function openAddDialog() {
         res.innerHTML = `<div class="result ok">${ic("check", "sm")}<span><b>${esc(r.display_name)}</b> (${esc(r.username)})${r.count != null ? ` · ${plural(r.count, "film")} on the watchlist` : ""}</span></div>`;
         add.disabled = false;
         add.focus();
+        showUsers(r);
       } else {
         res.innerHTML = `<div class="result bad">${ic("alert", "sm")}<span>${esc(r.detail)}</span></div>`;
       }
@@ -396,7 +439,8 @@ function openAddDialog() {
     if (!checked) return;
     add.disabled = true;
     try {
-      await api("/api/watchlists", { method: "POST", json: { username: checked } });
+      const user = userBox.classList.contains("hidden") ? null : Number(userSel.value);
+      await api("/api/watchlists", { method: "POST", json: { username: checked, seerr_user_id: user } });
       toast(`Added ${checked}`);
       close();
       await refresh();
@@ -449,9 +493,8 @@ async function renderConnections() {
       <p class="hint">An address this container can reach. localhost means the container itself.</p>
       <label class="field" for="seerr_api_key">API key</label>
       <input id="seerr_api_key" name="seerr_api_key" type="password" autocomplete="new-password">
-      <label class="field" for="seerr_user_id">Request as</label>
-      <div class="row" style="flex-wrap:nowrap"><select id="seerr_user_id" name="seerr_user_id"></select><button type="button" id="load-users">Load users</button></div>
       <label class="check"><input type="checkbox" name="request_4k"><span>Request 4K versions</span></label>
+      <p class="hint">Each watchlist requests as its own Seerr user. Pick it when you add a watchlist, or change it in edit mode.</p>
       <div id="seerr-result"></div>
       <div class="card-actions"><button type="button" id="test-seerr">Test connection</button><button type="submit" class="primary">Save</button></div>
     </form>
@@ -466,27 +509,16 @@ async function renderConnections() {
   form.seerr_url.value = settingsCache.seerr_url;
   form.seerr_api_key.placeholder = settingsCache.has_api_key ? "Saved. Leave empty to keep it" : "Seerr → Settings → General → API Key";
   form.request_4k.checked = settingsCache.request_4k;
-  renderUserSelect();
-  if (settingsCache.has_api_key && settingsCache.seerr_url && !seerrUsers) loadUsers(true);
 
   const body = () => ({ seerr_url: form.seerr_url.value.trim() || null, seerr_api_key: form.seerr_api_key.value.trim() || null });
   const result = (cls, text) => { $("#seerr-result").innerHTML = text ? `<div class="result ${cls}">${ic(cls === "ok" ? "check" : "alert", "sm")}<span>${esc(text)}</span></div>` : ""; };
 
-  async function loadUsers(quiet) {
-    try {
-      seerrUsers = await api("/api/seerr/users", { method: "POST", json: body() });
-      renderUserSelect();
-      if (!quiet) toast(`Loaded ${plural(seerrUsers.length, "user")}`);
-    } catch (e) { if (!quiet) result("bad", e.message); }
-  }
-  $("#load-users").addEventListener("click", () => loadUsers(false));
   $("#test-seerr").addEventListener("click", async (e) => {
     e.target.disabled = true;
     result("info", "Testing…");
     try {
       const r = await api("/api/test/seerr", { method: "POST", json: body() });
       result(r.ok ? "ok" : "bad", r.ok ? `Connected as ${r.user}${r.version ? ` · Seerr v${r.version}` : ""}` : r.detail);
-      if (r.ok) loadUsers(true);
     } catch (err) { result("bad", err.message); }
     e.target.disabled = false;
   });
@@ -494,7 +526,6 @@ async function renderConnections() {
     e.preventDefault();
     const payload = {
       seerr_url: form.seerr_url.value,
-      seerr_user_id: form.seerr_user_id.value ? Number(form.seerr_user_id.value) : null,
       request_4k: form.request_4k.checked,
     };
     if (form.seerr_api_key.value.trim()) payload.seerr_api_key = form.seerr_api_key.value.trim();
@@ -503,6 +534,7 @@ async function renderConnections() {
       form.seerr_api_key.value = "";
       form.seerr_api_key.placeholder = settingsCache.has_api_key ? "Saved. Leave empty to keep it" : "";
       result("", "");
+      seerrUsers = null;
       toast("Saved");
       await refresh();
     } catch (err) { result("bad", err.message); }
@@ -512,17 +544,6 @@ async function renderConnections() {
     $("#lb-status").textContent = "Checking…";
     try { status = await api("/api/checks/refresh", { method: "POST" }); render(); } catch (err) { toast(err.message); }
   });
-}
-
-function renderUserSelect() {
-  const select = $("#seerr_user_id");
-  if (!select) return;
-  const current = select.value || (settingsCache?.seerr_user_id ? String(settingsCache.seerr_user_id) : "");
-  const users = seerrUsers || [];
-  let options = `<option value="">Owner of the API key</option>` + users.map((u) => `<option value="${u.id}">${esc(u.name)} (#${u.id})</option>`).join("");
-  if (current && !users.some((u) => String(u.id) === current)) options += `<option value="${esc(current)}">User #${esc(current)}</option>`;
-  select.innerHTML = options;
-  select.value = current;
 }
 
 /* ---------- logs ---------- */

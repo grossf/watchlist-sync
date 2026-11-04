@@ -122,6 +122,8 @@ a.lg:hover { color: var(--text); text-decoration: underline; text-underline-offs
 .err .i { margin-top: 1px; }
 .editing .wl { border-style: dashed; }
 .wl.dragging { opacity: .4; }
+.wl .user-row { flex-wrap: nowrap; gap: 10px; margin-top: 10px; }
+.wl .user-row label { flex: none; }
 .grip { color: var(--dim); cursor: grab; display: inline-flex; margin-right: 4px; }
 .confirm { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 12px; }
 .banner { display: flex; gap: 9px; align-items: flex-start; border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px; font-size: 13px; border: 1px solid; }
