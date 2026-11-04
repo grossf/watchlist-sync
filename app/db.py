@@ -36,7 +36,10 @@ CREATE TABLE IF NOT EXISTS events (
     title TEXT,
     slug TEXT,
     tmdb_id INTEGER,
-    detail TEXT
+    detail TEXT,
+    user_name TEXT,
+    approval TEXT,
+    pending INTEGER
 );
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id);
 CREATE INDEX IF NOT EXISTS events_kind ON events(kind);
@@ -44,6 +47,17 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS film_state (
+    source TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    title TEXT,
+    tmdb_id INTEGER,
+    kind TEXT NOT NULL,
+    detail TEXT,
+    since TEXT NOT NULL,
+    PRIMARY KEY (source, slug)
+);
+CREATE INDEX IF NOT EXISTS film_state_list ON film_state(source, kind, since);
 CREATE TABLE IF NOT EXISTS film_cache (
     slug TEXT PRIMARY KEY,
     tmdb_id INTEGER,
@@ -73,10 +87,6 @@ def init() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     with conn() as c:
         c.executescript(SCHEMA)
-        columns = {r["name"] for r in c.execute("PRAGMA table_info(runs)")}
-        for name, ddl in (("total", "INTEGER"), ("in_seerr", "INTEGER NOT NULL DEFAULT 0")):
-            if name not in columns:
-                c.execute(f"ALTER TABLE runs ADD COLUMN {name} {ddl}")
         c.execute(
             "UPDATE runs SET status='interrupted', finished_at=? WHERE status='running'", (now(),)
         )
@@ -104,21 +114,53 @@ def update_run(run_id: int, **fields) -> None:
         c.execute(f"UPDATE runs SET {cols} WHERE id=?", (*fields.values(), run_id))
 
 
-def add_event(run_id: int, kind: str, title=None, slug=None, tmdb_id=None, detail=None) -> None:
+def add_event(run_id: int, kind: str, title=None, slug=None, tmdb_id=None, detail=None,
+              user_name=None, approval=None, pending=None) -> None:
     with conn() as c:
         c.execute(
-            "INSERT INTO events (run_id, ts, kind, title, slug, tmdb_id, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (run_id, now(), kind, title, slug, tmdb_id, detail),
+            "INSERT INTO events (run_id, ts, kind, title, slug, tmdb_id, detail, user_name, approval, pending) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, now(), kind, title, slug, tmdb_id, detail, user_name, approval, pending),
         )
 
 
-def runs(source: str | None = None, limit: int = 30) -> list[dict]:
-    sql, args = "SELECT * FROM runs", []
-    if source:
-        sql += " WHERE source = ?"
-        args.append(source)
+def film_states(source: str) -> dict[str, dict]:
     with conn() as c:
-        return [dict(r) for r in c.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, limit))]
+        return {r["slug"]: dict(r) for r in c.execute("SELECT * FROM film_state WHERE source=?", (source,))}
+
+
+def set_film_state(source: str, slug: str, title: str, tmdb_id, kind: str, detail) -> None:
+    with conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO film_state (source, slug, title, tmdb_id, kind, detail, since) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (source, slug, title, tmdb_id, kind, detail, now()),
+        )
+
+
+def delete_film_states(source: str, slugs: list[str] | None = None) -> None:
+    with conn() as c:
+        if slugs is None:
+            c.execute("DELETE FROM film_state WHERE source=?", (source,))
+        else:
+            c.executemany("DELETE FROM film_state WHERE source=? AND slug=?", [(source, s) for s in slugs])
+
+
+def film_list(source: str, kinds: list[str], cursor: tuple[str, str] | None, limit: int) -> list[dict]:
+    sql = f"SELECT * FROM film_state WHERE source=? AND kind IN ({','.join('?' * len(kinds))})"
+    args: list = [source, *kinds]
+    if cursor:
+        sql += " AND (since, slug) < (?, ?)"
+        args.extend(cursor)
+    sql += " ORDER BY since DESC, slug DESC LIMIT ?"
+    args.append(limit)
+    with conn() as c:
+        return [dict(r) for r in c.execute(sql, args)]
+
+
+def film_counts(source: str) -> dict[str, int]:
+    with conn() as c:
+        return {r["kind"]: r["n"] for r in c.execute(
+            "SELECT kind, COUNT(*) AS n FROM film_state WHERE source=? GROUP BY kind", (source,))}
 
 
 def last_run_per_source() -> dict[str, dict]:
@@ -130,7 +172,7 @@ def last_run_per_source() -> dict[str, dict]:
 
 
 def events(kinds: list[str] | None = None, source: str | None = None, run_id: int | None = None,
-           limit: int = 300) -> list[dict]:
+           limit: int = 50, before: int | None = None, after: int | None = None) -> list[dict]:
     sql = "SELECT e.*, r.source, r.label AS source_label FROM events e JOIN runs r ON r.id = e.run_id WHERE 1=1"
     args: list = []
     if kinds:
@@ -142,6 +184,12 @@ def events(kinds: list[str] | None = None, source: str | None = None, run_id: in
     if run_id:
         sql += " AND e.run_id = ?"
         args.append(run_id)
+    if before:
+        sql += " AND e.id < ?"
+        args.append(before)
+    if after:
+        sql += " AND e.id > ?"
+        args.append(after)
     sql += " ORDER BY e.id DESC LIMIT ?"
     args.append(limit)
     with conn() as c:

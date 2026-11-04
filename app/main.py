@@ -145,6 +145,7 @@ def status():
         "schedule_time": s.schedule_time,
         "timezone": str(TZ),
         "dry_run": s.dry_run,
+        "log_retention_days": s.log_retention_days,
         "password_enabled": auth.enabled(),
         "seerr": {
             "configured": bool(s.seerr_url and s.seerr_api_key),
@@ -175,15 +176,44 @@ def run(body: RunBody):
     return {"started": True}
 
 
-@app.get("/api/runs")
-def runs(watchlist: str | None = None, limit: int = 30):
-    return db.runs(_watchlist_key(watchlist) if watchlist else None, min(limit, 200))
+LOG_KINDS = {
+    "requested": ["requested", "would_request"],
+    "not_found": ["not_found"],
+    "skipped": ["skipped"],
+    "problems": ["error", "sync_stopped", "limit_reached"],
+}
+FILM_KINDS = {
+    "requested": ["requested", "would_request"],
+    "not_found": ["not_found"],
+    "skipped": ["skipped"],
+    "failed": ["error"],
+}
+PAGE = 50
 
 
 @app.get("/api/events")
-def events(kind: str | None = None, watchlist: str | None = None, limit: int = 300):
-    kinds = {"requested": ["requested", "would_request"]}.get(kind, [kind]) if kind else None
-    return db.events(kinds, _watchlist_key(watchlist) if watchlist else None, limit=min(limit, 2000))
+def events(kind: str | None = None, watchlist: str | None = None, before: int | None = None, after: int | None = None):
+    if kind and kind not in LOG_KINDS:
+        raise HTTPException(400, "Unknown filter")
+    rows = db.events(LOG_KINDS[kind] if kind else None, _watchlist_key(watchlist) if watchlist else None,
+                     limit=PAGE + 1, before=before, after=after)
+    return {"items": rows[:PAGE], "has_more": len(rows) > PAGE}
+
+
+@app.get("/api/watchlists/{username}/films")
+def watchlist_films(username: str, kind: str = "not_found", cursor: str | None = None):
+    if username not in settings.load().letterboxd_usernames:
+        raise HTTPException(404, "Unknown watchlist")
+    if kind not in FILM_KINDS:
+        raise HTTPException(400, "Unknown category")
+    source = _watchlist_key(username)
+    since, _, slug = (cursor or "").partition("|")
+    rows = db.film_list(source, FILM_KINDS[kind], (since, slug) if cursor else None, PAGE + 1)
+    raw = db.film_counts(source)
+    counts = {k: sum(raw.get(x, 0) for x in kinds) for k, kinds in FILM_KINDS.items()}
+    items = rows[:PAGE]
+    next_cursor = f"{items[-1]['since']}|{items[-1]['slug']}" if len(rows) > PAGE else None
+    return {"items": items, "counts": counts, "next_cursor": next_cursor}
 
 
 def _check_username(raw: str) -> tuple[str, dict]:
@@ -223,6 +253,7 @@ def remove_watchlist(username: str):
         raise HTTPException(404, "Unknown watchlist")
     settings.save({"letterboxd_usernames": [u for u in s.letterboxd_usernames if u != username],
                    "watchlist_users": {u: i for u, i in s.watchlist_users.items() if u != username}})
+    db.delete_film_states(_watchlist_key(username))
     checks.watchlist_state = {u: c for u, c in checks.watchlist_state.items() if u != username}
     return {"ok": True}
 

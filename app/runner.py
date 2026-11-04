@@ -21,6 +21,10 @@ class StopSync(Exception):
     pass
 
 
+def plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
 def is_running() -> bool:
     return _lock.locked()
 
@@ -50,10 +54,29 @@ def _run_source(s: Settings, source: Source, trigger: str, dry_run: bool, lb: Le
     consecutive_errors = 0
     last_error = None
     quota_hit = False
+    states = db.film_states(source.key)
+    seen: set[str] = set()
+    user_name, user_approval = None, None
 
     def bump(key: str) -> None:
         counts[key] += 1
         current[key] = counts[key]
+
+    def record(film: Film, kind: str, tmdb_id: int | None, detail: str | None = None, pending: bool | None = None) -> None:
+        seen.add(film.slug)
+        bump("requested" if kind == "would_request" else "errors" if kind == "error" else kind)
+        if kind in ("in_seerr", "requested", "would_request"):
+            detail = None
+        prev = states.get(film.slug)
+        if prev and prev["kind"] == kind and prev["detail"] == detail:
+            return
+        db.set_film_state(source.key, film.slug, film.name, tmdb_id, kind, detail)
+        if kind == "in_seerr":
+            return
+        requesting = kind in ("requested", "would_request")
+        db.add_event(run_id, kind, film.name, film.slug, tmdb_id, detail,
+                     user_name if requesting else None, user_approval if requesting else None,
+                     int(pending) if pending is not None else None)
 
     try:
         seerr_check = checks.seerr_state or {}
@@ -63,61 +86,51 @@ def _run_source(s: Settings, source: Source, trigger: str, dry_run: bool, lb: Le
         if checks.seerr_users is not None and user is None:
             raise StopSync(f"Seerr user #{source.seerr_user_id} doesn't exist anymore. "
                            "Pick another user for this watchlist in edit mode.")
-        user_name = user["name"] if user else f"user #{source.seerr_user_id or checks.API_KEY_USER}"
-        if user and approval(user.get("permissions"), s.request_4k) == "none":
+        user_name = user["name"] if user else f"User #{source.seerr_user_id or checks.API_KEY_USER}"
+        user_approval = approval(user.get("permissions"), s.request_4k) if user else None
+        if user_approval == "none":
             raise StopSync(f"{user_name} isn't allowed to request {'4K ' if s.request_4k else ''}movies in Seerr. "
                            "Change their permissions in Seerr, or pick another user in edit mode.")
         try:
             for film in lb.iter_films(source.path, MAX_PAGES):
-                bump("scanned")
+                counts["scanned"] += 1
+                current["scanned"] = counts["scanned"]
                 tmdb_id = None
                 try:
                     tmdb_id, tmdb_type = _resolve_tmdb(lb, film)
                     if tmdb_type == "tv":
-                        bump("skipped")
-                        db.add_event(run_id, "skipped", film.name, film.slug, tmdb_id,
-                                     "Letterboxd links this to a TV show, only movies are requested")
+                        record(film, "skipped", tmdb_id, "Letterboxd links this to a TV show, only movies are requested")
                         continue
 
                     movie = seerr.movie(tmdb_id) if tmdb_id else None
                     if movie is None:
                         movie = seerr.search_movie(film.title, film.year)
                         if movie is None:
-                            bump("not_found")
                             reason = (f"TMDB {tmdb_id} is unknown to Seerr" if tmdb_id
-                                      else "Letterboxd has no TMDB id for this film")
-                            db.add_event(run_id, "not_found", film.name, film.slug, tmdb_id,
-                                         f"{reason}, and a title search found nothing")
+                                      else "Letterboxd has no TMDB ID for this film")
+                            record(film, "not_found", tmdb_id, f"{reason}, and a title search found nothing")
                             continue
                         movie = seerr.movie(movie["id"]) or movie
                         tmdb_id = movie["id"]
 
                     state = existing_state(movie, s.request_4k)
                     if state:
-                        kind, reason = state
-                        bump(kind)
-                        if kind == "skipped":
-                            db.add_event(run_id, "skipped", film.name, film.slug, tmdb_id, reason)
+                        record(film, state[0], tmdb_id, state[1])
                         continue
 
                     if dry_run:
-                        db.add_event(run_id, "would_request", film.name, film.slug, tmdb_id,
-                                     "Dry run, nothing was sent")
+                        record(film, "would_request", tmdb_id)
                     else:
                         created = seerr.request_movie(tmdb_id, s.request_4k, source.seerr_user_id)
-                        pending = created.get("status") == REQUEST_PENDING
-                        db.add_event(run_id, "requested", film.name, film.slug, tmdb_id,
-                                     f"Requested as {user_name}" + (", waiting for approval" if pending else ""))
-                    bump("requested")
+                        record(film, "requested", tmdb_id, pending=created.get("status") == REQUEST_PENDING)
                     consecutive_errors = 0
                 except (LetterboxdBlocked, QuotaReached):
                     raise
                 except Exception as exc:
                     log.exception("Failed on %s", film.slug)
-                    bump("errors")
                     consecutive_errors += 1
                     last_error = str(exc)
-                    db.add_event(run_id, "error", film.name, film.slug, tmdb_id, last_error)
+                    record(film, "error", tmdb_id, last_error)
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                         raise StopSync(f"Sync stopped after {consecutive_errors} errors in a row: {last_error}")
         except LetterboxdBlocked:
@@ -131,20 +144,24 @@ def _run_source(s: Settings, source: Source, trigger: str, dry_run: bool, lb: Le
             counts["scanned"] -= 1
             current["scanned"] = counts["scanned"]
         if quota_hit:
-            message = f"{user_name} reached their Seerr request limit. The remaining films are tried at the next sync."
+            message = (f"{user_name} reached their Seerr request limit after {plural(counts['requested'], 'request')}. "
+                       "The remaining films are tried at the next sync.")
+            db.add_event(run_id, "limit_reached", detail=message, user_name=user_name, approval=user_approval)
         elif lb.truncated:
             message = f"Only the first {MAX_PAGES * 28} films were checked"
         elif counts["errors"]:
-            failed = counts["errors"]
-            message = f"{failed} film{'' if failed == 1 else 's'} failed: {last_error}"
+            message = f"{plural(counts['errors'], 'film')} failed: {last_error}"
         if not (lb.truncated or quota_hit):
             total = counts["scanned"]
+            db.delete_film_states(source.key, [slug for slug in states if slug not in seen])
     except StopSync as exc:
         status, message = "failed", str(exc)
     except Exception as exc:
         log.exception("Sync for %s failed", source.key)
         status, message = "failed", f"Sync failed: {exc}"
     finally:
+        if status == "failed":
+            db.add_event(run_id, "sync_stopped", detail=message)
         db.update_run(run_id, status=status, message=message, finished_at=db.now(), total=total, **counts)
         log.info("%s finished: %s %s", source.label, status, counts)
 

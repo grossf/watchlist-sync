@@ -2,7 +2,7 @@
 
 <h1 align="center">Watchlist Sync</h1>
 
-Once a day, this app reads your public Letterboxd watchlist and requests every film that Seerr doesn't already have. A film is left alone if it's available, requested, processing, deleted or blocklisted. Everything is set up in the web GUI. It also lets you sync by hand, do a dry run, and read a log that shows which films it could not find on Seerr.
+Once a day, this app reads your public Letterboxd watchlist and requests every film that Seerr doesn't already have. A film is left alone if it's available, requested, processing, deleted or blocklisted. Everything is set up in the web GUI. It also lets you sync by hand, do a dry run, and see which films it could not find on Seerr.
 
 ## Setup
 
@@ -21,7 +21,7 @@ Open `http://<server>:8080`. On first launch the Watchlists page walks you throu
 
 Dry run is on for a fresh install: do a first sync, check the Logs page, then turn dry run off in **Settings**. Settings also holds the daily sync time and an optional password. Set one if the app is reachable from outside your home network, because the page can use your Seerr API key.
 
-Each watchlist card shows a bar with the result of its last sync: in Seerr (green), requested (blue), skipped (grey: deleted, blocklisted, declined or TV), not found on Seerr (amber) and failed (red). Click a number to open the matching log entries.
+Each watchlist card shows a bar with the result of its last sync: in Seerr (green), requested (blue), skipped (grey: deleted, blocklisted, declined or TV), not found on Seerr (amber) and failed (red). Click a number to see those films, such as every film Seerr couldn't find. The Logs page only lists what changed: new requests, films that are newly not found or skipped, and sync problems.
 
 The only environment variable is `TZ` (set in `docker-compose.yml`), which controls the sync time and log timestamps. Settings, log and cache live in `./data/app.db`.
 

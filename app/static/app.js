@@ -1,7 +1,7 @@
 const $ = (sel, el = document) => el.querySelector(sel);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ic = (name, cls = "") => `<svg class="i ${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
-const APPROVAL = { auto: "auto-approved", manual: "needs your approval", none: "can't request movies" };
+const APPROVAL = { auto: "auto-approved", manual: "needs approval", none: "can't request movies" };
 const COLORS = { in_seerr: "var(--green)", requested: "var(--blue)", would_request: "var(--purple)", skipped: "var(--grey)", not_found: "var(--amber)", errors: "var(--red)" };
 
 let status = null;
@@ -11,6 +11,8 @@ let editOrder = [];
 let confirmRemove = null;
 let wasRunning = false;
 let logsLoadedAt = 0;
+let logItems = [];
+let logHasMore = false;
 let seerrUsers = null;
 let settingsCache = null;
 
@@ -40,16 +42,28 @@ async function api(path, { method = "GET", json } = {}) {
   return body;
 }
 
-function when(iso) {
-  if (!iso) return "";
+function dayLabel(iso) {
   const d = new Date(iso);
   const now = new Date();
-  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
   const diff = Math.round((day(now) - day(d)) / 86400000);
-  if (diff === 0) return `today ${time}`;
-  if (diff === 1) return `yesterday ${time}`;
-  return `${d.toLocaleDateString([], { day: "numeric", month: "short" })} ${time}`;
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Yesterday";
+  const opts = { day: "numeric", month: "short" };
+  if (d.getFullYear() !== now.getFullYear()) opts.year = "numeric";
+  return d.toLocaleDateString("en-GB", opts);
+}
+
+const lowerDay = (label) => (/^(Today|Yesterday)$/.test(label) ? label.toLowerCase() : label);
+
+function when(iso) {
+  if (!iso) return "";
+  const time = new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  return `${lowerDay(dayLabel(iso))} ${time}`;
+}
+
+function fullDate(iso) {
+  return new Date(iso).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
 }
 
 function ago(iso) {
@@ -64,11 +78,13 @@ function ago(iso) {
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const seerrOk = () => !!status?.seerr.check?.ok;
 const isLive = (w) => status?.running && status.current?.username === w.username;
+const tag = (icon, html, cls = "") => `<span class="tag ${cls}">${ic(icon)}${html}</span>`;
+const userTag = (name, approval) => tag("user", `${esc(name)}${APPROVAL[approval] ? ` <em>(${APPROVAL[approval]})</em>` : ""}`);
 
 function userOptions(selected) {
   const users = seerrUsers || [];
   const list = users.some((u) => u.id === selected.id) ? users : [selected, ...users];
-  return list.map((u) => `<option value="${u.id}" ${u.id === selected.id ? "selected" : ""}>${esc(u.name)}${APPROVAL[u.approval] ? ` · ${APPROVAL[u.approval]}` : ""}</option>`).join("");
+  return list.map((u) => `<option value="${u.id}" ${u.id === selected.id ? "selected" : ""}>${esc(u.name)}${APPROVAL[u.approval] ? ` (${APPROVAL[u.approval]})` : ""}</option>`).join("");
 }
 
 async function loadSeerrUsers() {
@@ -80,12 +96,22 @@ function logsLink(params) {
   return "#/logs?" + new URLSearchParams(params).toString();
 }
 
+function filmsLink(username, kind) {
+  return `#/watchlists/${encodeURIComponent(username)}?kind=${kind}`;
+}
+
 /* ---------- routing ---------- */
 
 function parseRoute() {
   const [path, query] = location.hash.replace(/^#\/?/, "").split("?");
-  const page = ["watchlists", "connections", "logs", "settings"].includes(path) ? path : "watchlists";
-  route = { page, params: new URLSearchParams(query || "") };
+  const [base, sub] = path.split("/");
+  const params = new URLSearchParams(query || "");
+  if (base === "watchlists" && sub) {
+    route = { page: "watchlist", nav: "watchlists", username: decodeURIComponent(sub), params };
+    return;
+  }
+  const page = ["watchlists", "connections", "logs", "settings"].includes(base) ? base : "watchlists";
+  route = { page, nav: page, params };
 }
 
 window.addEventListener("hashchange", () => {
@@ -100,7 +126,7 @@ window.addEventListener("hashchange", () => {
 
 function renderShell() {
   if (!status) return;
-  document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.page === route.page));
+  document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.page === route.nav));
   const wlProblem = status.watchlists.some((w) => (w.check && !w.check.ok) || w.last_run?.status === "failed" || w.last_run?.errors);
   const connProblem = !status.seerr.configured || (status.seerr.check && !status.seerr.check.ok);
   $("#dot-watchlists").classList.toggle("hidden", !wlProblem);
@@ -153,10 +179,10 @@ function barHtml(seg) {
 
 function legendHtml(w, seg, run) {
   const label = { in_seerr: "in Seerr", requested: "requested", would_request: "would request", skipped: "skipped", not_found: "not found", errors: "failed" };
-  const kindFor = { requested: "requested", would_request: "requested", skipped: "skipped", not_found: "not_found", errors: "error" };
+  const kindFor = { requested: "requested", would_request: "requested", skipped: "skipped", not_found: "not_found", errors: "failed" };
   const items = seg.parts.map(([k, n]) => {
     const inner = `<span class="sw" style="background:${COLORS[k]}"></span>${n} ${label[k]}`;
-    return kindFor[k] ? `<a class="lg" href="${logsLink({ watchlist: w.username, kind: kindFor[k] })}">${inner}</a>` : `<span class="lg">${inner}</span>`;
+    return kindFor[k] ? `<a class="lg" href="${filmsLink(w.username, kindFor[k])}">${inner}</a>` : `<span class="lg">${inner}</span>`;
   });
   if (seg.notChecked) {
     items.push(`<span class="lg"><span class="sw" style="background:var(--line);box-shadow:inset 0 0 0 1px var(--line-strong)"></span>${seg.notChecked} not checked</span>`);
@@ -178,7 +204,10 @@ function cardHtml(w) {
   const name = editing
     ? `<span class="name">${esc(w.username)}</span>`
     : `<a class="name" href="${esc(w.url)}" target="_blank" rel="noopener" title="Open on Letterboxd">${esc(w.username)}${ic("ext", "sm ext")}</a>`;
-  const sub = [missing ? "watchlist not found" : count != null ? plural(count, "film") : "", !editing && w.seerr_user ? `as ${w.seerr_user.name}` : ""].filter(Boolean).join(" · ");
+  const tags = missing ? [tag("alert", "watchlist not found", "red")] : [
+    count != null ? tag("film", count.toLocaleString("en-GB")) : "",
+    !editing && w.seerr_user ? userTag(w.seerr_user.name, w.seerr_user.approval) : "",
+  ].filter(Boolean);
 
   let actions;
   if (editing) {
@@ -210,11 +239,11 @@ function cardHtml(w) {
       left = legendHtml(w, seg, run);
       right = when(run.started_at);
     } else {
-      left = `<span>Not synced yet${status.schedule_enabled ? ` · syncs at ${status.schedule_time}` : ""}</span>`;
+      left = `<span>Not synced yet${status.schedule_enabled ? `, syncs at ${status.schedule_time}` : ""}</span>`;
     }
     body += `<div class="row spread" style="align-items:flex-start;flex-wrap:nowrap"><div class="legend">${left}</div><span class="small dim" style="flex:none">${right}</span></div>`;
     if (!live && run?.message) {
-      body += `<div class="err ${run.status === "failed" || run.errors ? "" : "warn"}">${ic("alert", "sm")}<span>${esc(run.message)}${run.errors ? ` <a href="${logsLink({ watchlist: w.username, kind: "error" })}" style="text-decoration:underline;text-underline-offset:3px">Show in log</a>` : ""}</span></div>`;
+      body += `<div class="err ${run.status === "failed" || run.errors ? "" : "warn"}">${ic("alert", "sm")}<span>${esc(run.message)}${run.errors ? ` <a href="${filmsLink(w.username, "failed")}" style="text-decoration:underline;text-underline-offset:3px">Show films</a>` : ""}</span></div>`;
     } else if (check && !check.ok) {
       body += `<div class="err warn">${ic("alert", "sm")}<span>${esc(check.detail)}</span></div>`;
     }
@@ -226,7 +255,7 @@ function cardHtml(w) {
 
   return `<div class="card wl" data-u="${esc(w.username)}" ${editing ? 'draggable="true"' : ""}>
     <div class="card-head">
-      <div class="row" style="gap:6px;min-width:0">${editing ? `<span class="grip">${ic("grip")}</span>` : ""}${name}<span class="muted">${sub ? "· " + esc(sub) : ""}</span></div>
+      <div class="row" style="gap:6px;min-width:0">${editing ? `<span class="grip">${ic("grip")}</span>` : ""}${name}<span class="tags" style="margin-left:4px">${tags.join("")}</span></div>
       <div class="actions">${actions}</div>
     </div>${body}${confirm}</div>`;
 }
@@ -416,7 +445,7 @@ function openAddDialog() {
         res.innerHTML = `<div class="result info">${ic("alert", "sm")}<span>${esc(r.username)} is already in your list.</span></div>`;
       } else if (r.ok) {
         checked = r.username;
-        res.innerHTML = `<div class="result ok">${ic("check", "sm")}<span><b>${esc(r.display_name)}</b> (${esc(r.username)})${r.count != null ? ` · ${plural(r.count, "film")} on the watchlist` : ""}</span></div>`;
+        res.innerHTML = `<div class="result ok">${ic("check", "sm")}<span><b>${esc(r.display_name)}</b> (${esc(r.username)})${r.count != null ? `, ${plural(r.count, "film")} on the watchlist` : ""}</span></div>`;
         add.disabled = false;
         add.focus();
         showUsers(r);
@@ -548,28 +577,55 @@ async function renderConnections() {
 
 /* ---------- logs ---------- */
 
-const KIND = {
-  requested: ["Requested", "b-requested"],
-  would_request: ["Would request", "b-would_request"],
-  not_found: ["Not found", "b-not_found"],
-  skipped: ["Skipped", "b-skipped"],
-  error: ["Error", "b-error"],
+const LOG_FILTERS = [["", "All"], ["requested", "Requested"], ["not_found", "Not found"], ["skipped", "Skipped"], ["problems", "Problems"]];
+const LOG_EMPTY = {
+  "": ["Nothing logged in the last %d days", "New requests, films Seerr doesn't have and sync problems show up here."],
+  requested: ["No requests in the last %d days", ""],
+  not_found: ["No new films without a match in the last %d days", ""],
+  skipped: ["No newly skipped films in the last %d days", ""],
+  problems: ["No problems in the last %d days", "Failed films and stopped syncs show up here."],
 };
+
+function kindBadge(e) {
+  const [label, cls] = {
+    requested: [e.pending ? "Pending approval" : "Requested", "b-requested"],
+    would_request: ["Would request", "b-would_request"],
+    not_found: ["Not found", "b-not_found"],
+    skipped: ["Skipped", "b-skipped"],
+    error: ["Failed", "b-error"],
+    sync_stopped: ["Problem", "b-error"],
+    limit_reached: ["Limit", "b-limit"],
+  }[e.kind] || [e.kind, "b-skipped"];
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+function logRowHtml(e) {
+  const watchlist = (e.source || "").replace(/^watchlist:/, "");
+  const title = e.slug
+    ? `<a class="t" href="https://letterboxd.com/film/${esc(e.slug)}/" target="_blank" rel="noopener">${esc(e.title)}</a>`
+    : `<span class="t sys">${e.kind === "limit_reached" ? `${ic("pause", "sm")}Request limit reached` : `${ic("stop", "sm")}Sync stopped`}</span>`;
+  const tags = [tag("bookmark", esc(watchlist))];
+  if (e.user_name) tags.push(userTag(e.user_name, e.approval));
+  tags.push(kindBadge(e));
+  const why = e.detail && !["requested", "would_request"].includes(e.kind)
+    ? `<div class="why ${["error", "sync_stopped"].includes(e.kind) ? "red" : ""}">${esc(e.detail)}</div>` : "";
+  return `<div class="lrow"><div class="top">${title}<span class="when" title="${esc(fullDate(e.ts))}">${dayLabel(e.ts)}</span></div>
+    <div class="tags">${tags.join("")}</div>${why}</div>`;
+}
 
 function renderLogs() {
   const kind = route.params.get("kind") || "";
   const watchlist = route.params.get("watchlist") || "";
-  const chips = [["", "All"], ["not_found", "Not found"], ["requested", "Requested"], ["skipped", "Skipped"], ["error", "Errors"]];
   const names = [...new Set([...status.watchlists.map((w) => w.username), watchlist].filter(Boolean))];
   $("#page").innerHTML = `<div class="page-head"><h1>Logs</h1>
       <select id="log-list" style="width:auto"><option value="">All watchlists</option>${names.map((u) => `<option value="${esc(u)}" ${u === watchlist ? "selected" : ""}>${esc(u)}</option>`).join("")}</select></div>
-    <div class="chips">${chips.map(([k, t]) => `<button class="chip ${k === kind ? "on" : ""}" data-kind="${k}">${t}</button>`).join("")}</div>
-    <div class="card" style="padding:4px 16px" id="events"><div class="empty">Loading…</div></div>
-    <div class="section-title">Run history</div>
-    <div class="card" style="padding:4px 16px" id="runs"><div class="empty">Loading…</div></div>`;
+    <div class="chips">${LOG_FILTERS.map(([k, t]) => `<button class="chip ${k === kind ? "on" : ""}" data-kind="${k}">${t}</button>`).join("")}</div>
+    <div class="card" style="padding:2px 16px" id="events"><div class="empty">Loading…</div></div>`;
   $("#log-list").addEventListener("change", (e) => setLogParams({ watchlist: e.target.value, kind }));
   document.querySelectorAll(".chip").forEach((c) => c.addEventListener("click", () => setLogParams({ watchlist, kind: c.dataset.kind })));
-  loadLogs();
+  $("#events").addEventListener("click", (e) => { if (e.target.closest("#log-more")) loadLogs("more"); });
+  logItems = [];
+  loadLogs("reset");
 }
 
 function setLogParams(p) {
@@ -577,33 +633,104 @@ function setLogParams(p) {
   location.hash = Object.keys(params).length ? logsLink(params) : "#/logs";
 }
 
-async function loadLogs() {
+function drawLogs() {
+  const kind = route.params.get("kind") || "";
+  const days = status.log_retention_days;
+  let html;
+  if (!logItems.length) {
+    const [head, sub] = LOG_EMPTY[kind] || LOG_EMPTY[""];
+    html = `<div class="empty"><b>${head.replace("%d", days)}</b>${sub}</div>`;
+  } else {
+    html = logItems.map(logRowHtml).join("") + (logHasMore
+      ? `<div class="more"><button id="log-more">Show more</button></div>`
+      : `<div class="end">That's everything from the last ${days} days</div>`);
+  }
+  $("#events").innerHTML = html;
+}
+
+async function loadLogs(mode) {
   logsLoadedAt = Date.now();
+  const q = new URLSearchParams();
   const kind = route.params.get("kind") || "";
   const watchlist = route.params.get("watchlist") || "";
-  const q = new URLSearchParams({ limit: "300" });
   if (kind) q.set("kind", kind);
   if (watchlist) q.set("watchlist", watchlist);
-  const rq = new URLSearchParams({ limit: "30" });
-  if (watchlist) rq.set("watchlist", watchlist);
+  if (mode === "more" && logItems.length) q.set("before", logItems[logItems.length - 1].id);
+  if (mode === "newer" && logItems.length) q.set("after", logItems[0].id);
   try {
-    const [events, runs] = await Promise.all([api(`/api/events?${q}`), api(`/api/runs?${rq}`)]);
+    const r = await api(`/api/events?${q}`);
     if (route.page !== "logs") return;
-    $("#events").innerHTML = events.length ? events.map((e) => {
-      const [label, cls] = KIND[e.kind] || [e.kind, "b-skipped"];
-      const title = e.slug ? `<a class="t" href="https://letterboxd.com/film/${esc(e.slug)}/" target="_blank" rel="noopener">${esc(e.title)}</a>` : `<span class="t">Sync</span>`;
-      const tmdb = e.tmdb_id ? ` <a class="dim" href="https://www.themoviedb.org/movie/${e.tmdb_id}" target="_blank" rel="noopener">TMDB</a>` : "";
-      return `<div class="lrow"><div style="min-width:0">${title}${e.detail || tmdb ? `<div class="small muted">${esc(e.detail)}${tmdb}</div>` : ""}</div>
-        <div class="meta"><span class="badge ${cls}">${label}</span><div>${esc(e.source_label)} · ${when(e.ts)}</div></div></div>`;
-    }).join("") : `<div class="empty">Nothing logged${kind || watchlist ? " for this filter" : " yet"}</div>`;
-    $("#runs").innerHTML = runs.length ? runs.map((r) => {
-      const seg = segments(r);
-      const trigger = (r.trigger === "schedule" ? "Scheduled" : "Manual") + (r.dry_run ? " · dry run" : "");
-      const stateCls = r.status === "failed" ? "err" : "";
-      return `<div class="lrow run"><div class="grow"><div><span style="font-weight:500">${esc(r.label)}</span> <span class="small dim">· ${trigger}</span></div>
-        ${barHtml(seg)}${r.message ? `<div class="small ${stateCls}" style="margin-top:5px;${stateCls ? "" : "color:var(--muted)"}">${esc(r.message)}</div>` : ""}</div>
-        <div class="meta">${when(r.started_at)}<div>${r.scanned} checked</div></div></div>`;
-    }).join("") : `<div class="empty">No syncs yet</div>`;
+    if (mode === "reset" || (mode === "newer" && !logItems.length)) {
+      logItems = r.items;
+      logHasMore = r.has_more;
+    } else if (mode === "more") {
+      logItems = logItems.concat(r.items);
+      logHasMore = r.has_more;
+    } else if (r.items.length) {
+      logItems = r.items.concat(logItems);
+    } else return;
+    drawLogs();
+  } catch (e) { toast(e.message); }
+}
+
+/* ---------- watchlist results ---------- */
+
+const FILM_TABS = [["requested", "Requested"], ["not_found", "Not found"], ["skipped", "Skipped"], ["failed", "Failed"]];
+const FILM_EMPTY = {
+  requested: "Nothing was requested in the last sync",
+  not_found: "Seerr found every film in the last sync",
+  skipped: "Nothing was skipped in the last sync",
+  failed: "Nothing failed in the last sync",
+};
+let filmItems = [];
+let filmCursor = null;
+let filmCounts = null;
+
+function renderWatchlistFilms() {
+  const w = status.watchlists.find((x) => x.username === route.username);
+  const back = `<a class="back" href="#/watchlists">${ic("back")}Watchlists</a>`;
+  if (!w) {
+    $("#page").innerHTML = `${back}<div class="card"><div class="empty"><b>This watchlist isn't in your list anymore</b></div></div>`;
+    return;
+  }
+  const run = w.last_run;
+  $("#page").innerHTML = `${back}<div class="page-head"><h1>${esc(w.username)}</h1></div>
+    <p class="page-sub">${run ? `Results of the last sync, ${when(run.started_at)}${run.dry_run ? " (dry run)" : ""}` : "Not synced yet"}</p>
+    <div class="chips" id="film-tabs"></div>
+    <div class="card" style="padding:2px 16px" id="films"><div class="empty">Loading…</div></div>`;
+  $("#films").addEventListener("click", (e) => { if (e.target.closest("#film-more")) loadFilms(true); });
+  filmItems = [];
+  filmCursor = null;
+  loadFilms(false);
+}
+
+function drawFilms() {
+  const kind = route.params.get("kind") || "not_found";
+  $("#film-tabs").innerHTML = FILM_TABS.map(([k, t]) =>
+    `<a class="chip btn ${k === kind ? "on" : ""}" href="${filmsLink(route.username, k)}">${t}<b>${(filmCounts?.[k] ?? 0).toLocaleString("en-GB")}</b></a>`).join("");
+  if (!filmItems.length) {
+    $("#films").innerHTML = `<div class="empty"><b>${FILM_EMPTY[kind]}</b></div>`;
+    return;
+  }
+  const left = Math.max(0, (filmCounts?.[kind] ?? 0) - filmItems.length);
+  $("#films").innerHTML = filmItems.map((f) => `<div class="lrow"><div class="top">
+      <a class="t" href="https://letterboxd.com/film/${esc(f.slug)}/" target="_blank" rel="noopener">${esc(f.title)}</a>
+      <span class="when" title="${esc(fullDate(f.since))}">since ${lowerDay(dayLabel(f.since))}</span></div>
+      ${f.detail ? `<div class="why ${f.kind === "error" ? "red" : ""}">${esc(f.detail)}</div>` : ""}</div>`).join("")
+    + (filmCursor ? `<div class="more"><button id="film-more">Show more (${left.toLocaleString("en-GB")} left)</button></div>` : "");
+}
+
+async function loadFilms(more) {
+  const kind = route.params.get("kind") || "not_found";
+  const q = new URLSearchParams({ kind });
+  if (more && filmCursor) q.set("cursor", filmCursor);
+  try {
+    const r = await api(`/api/watchlists/${encodeURIComponent(route.username)}/films?${q}`);
+    if (route.page !== "watchlist") return;
+    filmItems = more ? filmItems.concat(r.items) : r.items;
+    filmCursor = r.next_cursor;
+    filmCounts = r.counts;
+    drawFilms();
   } catch (e) { toast(e.message); }
 }
 
@@ -686,6 +813,7 @@ function renderPage() {
   renderWatchlists.last = null;
   renderShell();
   if (route.page === "watchlists") renderWatchlists();
+  else if (route.page === "watchlist") renderWatchlistFilms();
   else if (route.page === "connections") renderConnections();
   else if (route.page === "logs") renderLogs();
   else renderSettings();
@@ -696,7 +824,8 @@ function render() {
   if (route.page === "watchlists") {
     if (!(editing && dragged)) renderWatchlists();
   } else if (route.page === "connections") updateConnectionsStatus();
-  else if (route.page === "logs" && (status.running || wasRunning) && Date.now() - logsLoadedAt > 4000) loadLogs();
+  else if (route.page === "logs" && (status.running || wasRunning) && Date.now() - logsLoadedAt > 4000) loadLogs("newer");
+  else if (route.page === "watchlist" && wasRunning && !status.running) renderWatchlistFilms();
 }
 
 async function refresh() {
