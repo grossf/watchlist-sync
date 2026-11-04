@@ -28,7 +28,7 @@ The only environment variable is `TZ` (set in `docker-compose.yml`), which contr
 3. It looks the film up in Seerr by TMDB ID. If Seerr doesn't know that ID, it searches Seerr by title and year.
 4. It leaves the film alone if Seerr already has it (available, partially available, pending, processing or requested) or if it was deleted, blocklisted or declined there.
 
-The first sync of a large watchlist takes a while because each film page is read once, about 1.5 s per film. Later syncs only read the watchlist pages plus any new films.
+The first sync of a large watchlist takes a while because each film page is read once, about 2 s per film. Later syncs only read the watchlist pages plus any new films.
 
 ## Forgot the password
 

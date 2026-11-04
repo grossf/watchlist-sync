@@ -20,7 +20,7 @@ class Settings:
     schedule_enabled: bool = True
     schedule_time: str = "04:00"
     dry_run: bool = True
-    letterboxd_delay: float = 1.5
+    letterboxd_delay: float = 2.0
     log_retention_days: int = 30
 
     @property

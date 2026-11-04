@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from .seerr import Seerr
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 STATIC = Path(__file__).parent / "static"
+mimetypes.add_type("font/woff2", ".woff2")
 OPEN_PATHS = {"/healthz", "/login", "/api/login"}
 
 
