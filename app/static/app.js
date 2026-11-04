@@ -744,7 +744,7 @@ async function renderSettings() {
         <label class="check"><input type="checkbox" name="schedule_enabled"><span>Sync automatically every day</span></label>
         <label class="field" for="schedule_time">Time</label>
         <div class="row" style="flex-wrap:nowrap"><input id="schedule_time" name="schedule_time" type="time" class="narrow"><span class="small dim">${esc(status.timezone)}, from the TZ variable</span></div>
-        <label class="check"><input type="checkbox" name="dry_run"><span>Dry run<div class="hint">Syncs only log what they would request and send nothing to Seerr. Use it to check a first sync.</div></span></label>
+        <div class="check"><input type="checkbox" id="dry_run" name="dry_run" aria-describedby="dry-run-hint"><div><label for="dry_run">Dry run</label><div class="hint" id="dry-run-hint">Syncs only log what they would request and send nothing to Seerr. Use it to check a first sync.</div></div></div>
       </div>
       <div class="card">
         <h2>Security</h2>
