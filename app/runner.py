@@ -11,6 +11,7 @@ log = logging.getLogger("runner")
 
 MAX_CONSECUTIVE_ERRORS = 5
 MAX_PAGES = 180
+RETRY_WAIT = 30
 
 _lock = threading.Lock()
 current: dict | None = None
@@ -22,6 +23,11 @@ class StopSync(Exception):
 
 def is_running() -> bool:
     return _lock.locked()
+
+
+def _set_waiting(waiting: bool) -> None:
+    if current is not None:
+        current["waiting"] = waiting
 
 
 def _resolve_tmdb(lb: Letterboxd, film: Film) -> tuple[int | None, str | None]:
@@ -104,8 +110,8 @@ def _run_source(s: Settings, source: Source, trigger: str, dry_run: bool, lb: Le
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                         raise StopSync(f"Sync stopped after {consecutive_errors} errors in a row: {last_error}")
         except LetterboxdBlocked:
-            raise StopSync(f"Sync stopped after {counts['scanned']} films: Letterboxd blocked the request. "
-                           "The next sync tries again.")
+            raise StopSync(f"Sync stopped after {counts['scanned']} films: Letterboxd kept blocking requests, "
+                           f"even after waiting {RETRY_WAIT} seconds. The next sync tries again.")
         except LookupError:
             checks.watchlist_state[source.username] = checks.test_watchlist(source.username)
             raise StopSync(f"Letterboxd has no public watchlist for {source.username}.")
@@ -135,7 +141,7 @@ def run(source_keys: list[str] | None, trigger: str, dry_run: bool | None = None
         checks.refresh()
         dry = s.dry_run if dry_run is None else dry_run
         sources = [src for src in s.sources if source_keys is None or src.key in source_keys]
-        lb = Letterboxd(s.letterboxd_delay)
+        lb = Letterboxd(s.letterboxd_delay, RETRY_WAIT, _set_waiting)
         seerr = Seerr(s.seerr_url, s.seerr_api_key)
         for source in sources:
             _run_source(s, source, trigger, dry, lb, seerr)

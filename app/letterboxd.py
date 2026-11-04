@@ -1,7 +1,7 @@
 import re
 import time
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Callable, Iterator
 
 import httpx
 from bs4 import BeautifulSoup
@@ -23,9 +23,17 @@ class Film:
     year: int | None
 
 
+def _blocked(resp: httpx.Response) -> bool:
+    if resp.status_code == 429:
+        return True
+    return resp.status_code in (403, 503) and ("Just a moment" in resp.text or "challenge" in resp.text.lower())
+
+
 class Letterboxd:
-    def __init__(self, delay: float) -> None:
+    def __init__(self, delay: float, retry_wait: float = 0, on_wait: Callable[[bool], None] | None = None) -> None:
         self.delay = delay
+        self.retry_wait = retry_wait
+        self.on_wait = on_wait
         self._last = 0.0
         self.client = httpx.Client(
             base_url=BASE_URL,
@@ -34,15 +42,24 @@ class Letterboxd:
             follow_redirects=True,
         )
 
-    def _get(self, path: str) -> str:
+    def _request(self, path: str) -> httpx.Response:
         wait = self._last + self.delay - time.monotonic()
         if wait > 0:
             time.sleep(wait)
         resp = self.client.get(path)
         self._last = time.monotonic()
-        if resp.status_code in (403, 429, 503) and (
-            "Just a moment" in resp.text or "challenge" in resp.text.lower()
-        ):
+        return resp
+
+    def _get(self, path: str) -> str:
+        resp = self._request(path)
+        if _blocked(resp) and self.retry_wait:
+            if self.on_wait:
+                self.on_wait(True)
+            time.sleep(self.retry_wait)
+            if self.on_wait:
+                self.on_wait(False)
+            resp = self._request(path)
+        if _blocked(resp):
             raise LetterboxdBlocked(
                 f"Letterboxd answered {path} with a Cloudflare bot check (HTTP {resp.status_code})"
             )

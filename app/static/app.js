@@ -187,7 +187,10 @@ function cardHtml(w) {
   } else {
     body += barHtml(seg);
     let left, right = "";
-    if (live) {
+    if (live?.waiting) {
+      left = `<span style="color:var(--amber)">Letterboxd asked to slow down, waiting 30 s… ${live.scanned}${live.total ? ` of ${live.total}` : ""} checked</span>`;
+      right = "now";
+    } else if (live) {
       left = `<span>Syncing… ${live.scanned}${live.total ? ` of ${live.total}` : ""} checked</span>`;
       right = "now";
     } else if (run && seg) {
