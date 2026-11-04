@@ -6,9 +6,13 @@ Once a day, this app reads your public Letterboxd watchlist and requests every f
 
 ## Setup
 
+Copy [`docker-compose.yml`](docker-compose.yml) to your server, set `TZ` to your time zone, then start it:
+
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
+
+The image is `ghcr.io/grossf/watchlist-sync` for amd64 and arm64. `latest` follows the newest release, or pin a version such as `v0.1.0`.
 
 Open `http://<server>:8080`. On first launch the Watchlists page walks you through two steps:
 
@@ -34,6 +38,20 @@ The first sync of a large watchlist takes a while because each film page is read
 
 ```bash
 docker compose exec watchlist-sync python -c "from app import auth; auth.set_password(None)"
+```
+
+## Updating
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+## Building it yourself
+
+In a clone of this repo, replace `image:` with `build: .` in `docker-compose.yml`, then run:
+
+```bash
+docker compose up -d --build
 ```
 
 ## Running without Docker

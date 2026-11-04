@@ -116,7 +116,7 @@ function renderShell() {
   const foot = $("#foot-state");
   foot.className = "row " + cls;
   foot.innerHTML = `<span class="dot"></span><span>${esc(text)}</span>`;
-  $("#version").textContent = `· v${status.version}`;
+  $("#version").textContent = `· ${/^\d/.test(status.version) ? "v" : ""}${status.version}`;
   $("#github").href = status.github_url;
   $("#logout").classList.toggle("hidden", !status.password_enabled);
 }

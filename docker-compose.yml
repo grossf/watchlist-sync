@@ -1,6 +1,6 @@
 services:
   watchlist-sync:
-    build: .
+    image: ghcr.io/grossf/watchlist-sync:latest
     container_name: watchlist-sync
     restart: unless-stopped
     ports:

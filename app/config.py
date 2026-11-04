@@ -15,5 +15,5 @@ class Source:
     seerr_user_id: int | None = None
 
 
-VERSION = "1.0.0"
+VERSION = os.environ.get("APP_VERSION", "dev").removeprefix("v")
 GITHUB_URL = "https://github.com/grossf/watchlist-sync"

@@ -9,6 +9,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 RUN mkdir -p /data
 
+ARG APP_VERSION=dev
+ENV APP_VERSION=$APP_VERSION
+
 VOLUME /data
 EXPOSE 8080
 
