@@ -16,4 +16,4 @@ class Source:
 
 
 VERSION = "1.0.0"
-GITHUB_URL = "https://github.com/"
+GITHUB_URL = "https://github.com/grossf/watchlist-sync"
