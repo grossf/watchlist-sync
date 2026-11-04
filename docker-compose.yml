@@ -1,0 +1,11 @@
+services:
+  watchlist-sync:
+    build: .
+    container_name: watchlist-sync
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      TZ: Europe/Berlin
+    volumes:
+      - ./data:/data

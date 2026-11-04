@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log in · Watchlist Sync</title>
+<link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="login">
+  <div class="brand"><img class="logo" src="/static/logo.svg" alt="">Watchlist Sync</div>
+  <form class="card" id="login" style="padding:20px">
+    <label class="field" for="password" style="margin-top:0">Password</label>
+    <input id="password" type="password" autocomplete="current-password" autofocus required>
+    <div id="error"></div>
+    <div class="card-actions"><button class="primary" type="submit" style="width:100%;justify-content:center">Log in</button></div>
+  </form>
+</div>
+<script>
+document.getElementById("login").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const error = document.getElementById("error");
+  error.innerHTML = "";
+  const r = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: document.getElementById("password").value }),
+  });
+  if (r.ok) { location.href = "/"; return; }
+  const detail = (await r.json().catch(() => ({}))).detail || "Login failed";
+  error.innerHTML = '<div class="result bad"></div>';
+  error.firstChild.textContent = detail;
+});
+</script>
+</body>
+</html>
